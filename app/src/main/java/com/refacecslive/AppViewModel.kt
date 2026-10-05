@@ -34,8 +34,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     var midiStatus by mutableStateOf(
-        RefaceMidiClient.Status(false, "Looking for reface CS…")
+        RefaceMidiClient.Status(false, "Looking for MIDI devices…")
     )
+        private set
+
+    val midiDevices = mutableStateListOf<RefaceMidiClient.DeviceOption>()
+
+    var selectedMidiDeviceId by mutableStateOf<Int?>(null)
         private set
 
     var isBusy by mutableStateOf(false)
@@ -50,7 +55,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var loadedEntryIndex by mutableIntStateOf(-1)
         private set
 
-    private val midiClient = RefaceMidiClient(application) { status -> midiStatus = status }
+    private val midiClient = RefaceMidiClient(
+        context = application,
+        onStatus = { status -> midiStatus = status },
+        onDevicesChanged = { devices, selectedId ->
+            midiDevices.clear()
+            midiDevices.addAll(devices)
+            selectedMidiDeviceId = selectedId
+        }
+    )
 
     val currentSet: PerformanceSet
         get() = performanceSets.firstOrNull { it.id == currentSetId } ?: performanceSets.first()
@@ -60,6 +73,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun scanForDevice() {
         midiClient.scanAndConnect()
+    }
+
+    fun selectMidiDevice(deviceId: Int) {
+        midiClient.selectDevice(deviceId)
     }
 
     fun capturePatch(name: String) {

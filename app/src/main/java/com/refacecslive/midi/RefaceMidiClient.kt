@@ -17,7 +17,8 @@ import java.io.IOException
 
 class RefaceMidiClient(
     context: Context,
-    private val onStatus: (Status) -> Unit
+    private val onStatus: (Status) -> Unit,
+    private val onDevicesChanged: (List<DeviceOption>, Int?) -> Unit
 ) : Closeable {
     data class Status(
         val connected: Boolean,
@@ -25,8 +26,16 @@ class RefaceMidiClient(
         val detail: String = ""
     )
 
+    data class DeviceOption(
+        val id: Int,
+        val name: String,
+        val description: String
+    )
+
     private val manager = context.getSystemService(Context.MIDI_SERVICE) as MidiManager
+    private val preferences = context.getSharedPreferences("midi_device_selection", Context.MODE_PRIVATE)
     private val handler = Handler(Looper.getMainLooper())
+    private var selectedDeviceKey: String? = preferences.getString(KEY_SELECTED_DEVICE, null)
     private var device: MidiDevice? = null
     private var inputPort: MidiInputPort? = null
     private var outputPort: MidiOutputPort? = null
@@ -48,13 +57,16 @@ class RefaceMidiClient(
 
     private val deviceCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(info: MidiDeviceInfo) {
-            if (device == null) scanAndConnect()
+            refreshDeviceOptions()
+            if (device == null && openingDeviceId == null) scanAndConnect()
         }
 
         override fun onDeviceRemoved(info: MidiDeviceInfo) {
             if (device?.info?.id == info.id || openingDeviceId == info.id) {
-                disconnect("USB MIDI device disconnected")
+                disconnect("MIDI device disconnected")
                 scanAndConnect()
+            } else {
+                refreshDeviceOptions()
             }
         }
 
@@ -67,29 +79,56 @@ class RefaceMidiClient(
     }
 
     fun scanAndConnect() {
+        val candidates = refreshDeviceOptions()
         if (device != null || openingDeviceId != null) return
-        val candidates = manager.devices
-            .filter { it.inputPortCount > 0 && it.outputPortCount > 0 }
-            .sortedByDescending(::deviceScore)
 
-        val best = candidates.firstOrNull { deviceScore(it) > 0 }
-            ?: candidates.singleOrNull()
+        val remembered = selectedDeviceKey?.let { key ->
+            candidates.firstOrNull { deviceKey(it) == key }
+        }
+        val best = remembered
+            ?: if (selectedDeviceKey == null) {
+                candidates.firstOrNull { deviceScore(it) > USB_SCORE }
+                    ?: candidates.singleOrNull()
+            } else {
+                null
+            }
 
         if (best == null) {
             onStatus(
                 Status(
                     connected = false,
-                    title = "Reface not connected",
-                    detail = if (candidates.isEmpty()) {
-                        "Connect USB-C/OTG to the reface USB TO HOST port"
-                    } else {
-                        "No Yamaha reface CS found"
+                    title = when {
+                        candidates.isEmpty() -> "No MIDI device connected"
+                        selectedDeviceKey != null -> "Selected MIDI device unavailable"
+                        else -> "Choose a MIDI device"
+                    },
+                    detail = when {
+                        candidates.isEmpty() -> "Connect USB-C/OTG to the reface USB TO HOST port"
+                        selectedDeviceKey != null -> "Select another device or reconnect the saved device"
+                        else -> "More than one bidirectional MIDI device is available"
                     }
                 )
             )
             return
         }
         open(best)
+    }
+
+    fun selectDevice(deviceId: Int) {
+        val selected = midiCandidates().firstOrNull { it.id == deviceId }
+        if (selected == null) {
+            refreshDeviceOptions()
+            onStatus(Status(false, "MIDI device unavailable", "Scan and choose a connected device"))
+            return
+        }
+
+        selectedDeviceKey = deviceKey(selected)
+        preferences.edit().putString(KEY_SELECTED_DEVICE, selectedDeviceKey).apply()
+        refreshDeviceOptions()
+
+        if (device?.info?.id == selected.id) return
+        disconnect("Switching MIDI device")
+        open(selected)
     }
 
     fun captureCurrentPatch(callback: (Result<RefaceProtocol.PatchDump>) -> Unit) {
@@ -167,6 +206,10 @@ class RefaceMidiClient(
     }
 
     private fun open(info: MidiDeviceInfo) {
+        selectedDeviceKey = deviceKey(info)
+        preferences.edit().putString(KEY_SELECTED_DEVICE, selectedDeviceKey).apply()
+        refreshDeviceOptions()
+
         openingDeviceId = info.id
         val generation = ++connectionGeneration
         onStatus(Status(false, "Connecting…", deviceName(info)))
@@ -195,6 +238,7 @@ class RefaceMidiClient(
             inputPort = sendPort
             outputPort = receivePort
             receivePort.connect(receiver)
+            refreshDeviceOptions()
             onStatus(Status(true, "Connected", deviceName(info)))
         }, handler)
     }
@@ -239,6 +283,28 @@ class RefaceMidiClient(
             (frame[9].toInt() and 0xFF) == mid &&
             (frame[10].toInt() and 0xFF) == low
 
+    private fun midiCandidates(): List<MidiDeviceInfo> = manager.devices
+        .filter { it.inputPortCount > 0 && it.outputPortCount > 0 }
+        .sortedWith(compareByDescending<MidiDeviceInfo>(::deviceScore).thenBy(::deviceName))
+
+    private fun refreshDeviceOptions(): List<MidiDeviceInfo> {
+        val candidates = midiCandidates()
+        val selectedId = selectedDeviceKey?.let { key ->
+            candidates.firstOrNull { deviceKey(it) == key }?.id
+        }
+        onDevicesChanged(
+            candidates.map { info ->
+                DeviceOption(
+                    id = info.id,
+                    name = deviceName(info),
+                    description = "${deviceTransport(info)} · ${info.inputPortCount} in / ${info.outputPortCount} out"
+                )
+            },
+            selectedId
+        )
+        return candidates
+    }
+
     private fun deviceScore(info: MidiDeviceInfo): Int {
         val text = listOf(
             info.properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER),
@@ -250,7 +316,7 @@ class RefaceMidiClient(
         if ("reface cs" in text) score += 100
         if ("reface" in text) score += 40
         if ("yamaha" in text) score += 20
-        if (info.type == MidiDeviceInfo.TYPE_USB) score += 5
+        if (info.type == MidiDeviceInfo.TYPE_USB) score += USB_SCORE
         return score
     }
 
@@ -258,8 +324,25 @@ class RefaceMidiClient(
         val product = info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
         val name = info.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
         val manufacturer = info.properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
-        return product ?: name ?: listOfNotNull(manufacturer, "USB MIDI").joinToString(" ")
+        return product ?: name ?: listOfNotNull(manufacturer, "MIDI device").joinToString(" ")
     }
+
+    private fun deviceTransport(info: MidiDeviceInfo): String = when (info.type) {
+        MidiDeviceInfo.TYPE_USB -> "USB"
+        MidiDeviceInfo.TYPE_BLUETOOTH -> "Bluetooth"
+        MidiDeviceInfo.TYPE_VIRTUAL -> "Virtual"
+        else -> "MIDI"
+    }
+
+    private fun deviceKey(info: MidiDeviceInfo): String = listOf(
+        info.type.toString(),
+        info.properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER).orEmpty(),
+        info.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT).orEmpty(),
+        info.properties.getString(MidiDeviceInfo.PROPERTY_NAME).orEmpty(),
+        info.properties.getString("serial_number").orEmpty(),
+        info.inputPortCount.toString(),
+        info.outputPortCount.toString()
+    ).joinToString("|")
 
     private fun disconnect(reason: String) {
         connectionGeneration++
@@ -278,6 +361,7 @@ class RefaceMidiClient(
         inputPort = null
         device = null
         framer.reset()
+        refreshDeviceOptions()
         onStatus(Status(false, "Disconnected", reason))
     }
 
@@ -287,7 +371,9 @@ class RefaceMidiClient(
     }
 
     private companion object {
+        const val KEY_SELECTED_DEVICE = "selected_device_key"
         const val CAPTURE_TIMEOUT_MS = 2500L
         const val BULK_MESSAGE_GAP_MS = 12L
+        const val USB_SCORE = 5
     }
 }

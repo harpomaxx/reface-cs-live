@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -383,6 +384,7 @@ private fun LibraryScreen(viewModel: AppViewModel, modifier: Modifier = Modifier
 
 @Composable
 private fun ConnectionCard(viewModel: AppViewModel) {
+    var showDeviceDialog by remember { mutableStateOf(false) }
     val status = viewModel.midiStatus
     val statusColor = if (status.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     Card(
@@ -404,9 +406,83 @@ private fun ConnectionCard(viewModel: AppViewModel) {
                     Text(status.detail, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (!status.connected) TextButton(onClick = viewModel::scanForDevice) { Text("SCAN") }
-            if (viewModel.isBusy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            if (viewModel.isBusy) {
+                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            TextButton(
+                onClick = {
+                    viewModel.scanForDevice()
+                    showDeviceDialog = true
+                }
+            ) { Text("DEVICE") }
         }
+    }
+
+    if (showDeviceDialog) {
+        AlertDialog(
+            onDismissRequest = { showDeviceDialog = false },
+            title = { Text("Select MIDI device") },
+            text = {
+                if (viewModel.midiDevices.isEmpty()) {
+                    Text("No bidirectional MIDI devices found. Connect the reface CS and select Scan.")
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        itemsIndexed(
+                            viewModel.midiDevices,
+                            key = { _, option -> option.id }
+                        ) { _, option ->
+                            val selected = option.id == viewModel.selectedMidiDeviceId
+                            OutlinedCard(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        viewModel.selectMidiDevice(option.id)
+                                        showDeviceDialog = false
+                                    },
+                                border = BorderStroke(
+                                    if (selected) 2.dp else 1.dp,
+                                    if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        if (selected) "●" else "○",
+                                        color = if (selected) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(Modifier.weight(1f)) {
+                                        Text(option.name, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            option.description,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.scanForDevice()
+                    showDeviceDialog = false
+                }) { Text("SCAN") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeviceDialog = false }) { Text("CANCEL") }
+            }
+        )
     }
 }
 

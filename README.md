@@ -7,6 +7,7 @@ The app captures the reface CS tone-generator state through Yamaha SysEx, stores
 ## Features
 
 - Automatic reface CS detection through Android USB MIDI
+- Explicit MIDI device selection when several devices are connected
 - Capture and validate the current 61-byte reface CS patch dump
 - One-tap patch recall
 - Large stage-friendly previous/next controls
@@ -36,7 +37,7 @@ The generated APK is:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Enable installation from your file manager, copy the APK to the phone, and open it. Alternatively, with Android debugging enabled:
+Enable installation from your file manager, copy the APK to the phone, and open it. New APK versions use the same application ID, so Android updates the existing app instead of installing a second copy, while retaining the local library. Alternatively, with Android debugging enabled:
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
