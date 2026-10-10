@@ -9,6 +9,9 @@ The app captures the reface CS tone-generator state through Yamaha SysEx, stores
 - Automatic reface CS detection through Android USB MIDI
 - Explicit MIDI device selection when several devices are connected
 - Capture and validate the current 61-byte reface CS patch dump
+- Update an existing saved patch from the current reface CS sound
+- Full graphical editor for all 17 voice controls
+- Throttled live SysEx editing, audition, save-copy, and revert workflows
 - One-tap patch recall
 - Large stage-friendly previous/next controls
 - Multiple ordered setlists

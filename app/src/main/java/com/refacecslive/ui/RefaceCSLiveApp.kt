@@ -1,5 +1,6 @@
 package com.refacecslive.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -48,27 +49,46 @@ import androidx.compose.ui.unit.sp
 import com.refacecslive.AppViewModel
 import com.refacecslive.model.Patch
 
-private enum class Screen { PERFORMANCE, LIBRARY }
+private enum class Screen { PERFORMANCE, LIBRARY, EDITOR }
 
 @Composable
 fun RefaceCSLiveApp(viewModel: AppViewModel) {
     var screenName by rememberSaveable { mutableStateOf(Screen.PERFORMANCE.name) }
+    var pendingScreen by remember { mutableStateOf<Screen?>(null) }
     val screen = Screen.valueOf(screenName)
+
+    fun navigate(target: Screen) {
+        if (screen == Screen.EDITOR && target != Screen.EDITOR && viewModel.editorHasUnsavedChanges) {
+            pendingScreen = target
+        } else {
+            screenName = target.name
+        }
+    }
+
+    BackHandler(enabled = screen == Screen.EDITOR) {
+        navigate(Screen.LIBRARY)
+    }
 
     Scaffold(
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
                     selected = screen == Screen.PERFORMANCE,
-                    onClick = { screenName = Screen.PERFORMANCE.name },
+                    onClick = { navigate(Screen.PERFORMANCE) },
                     icon = { Text("▶", fontSize = 19.sp) },
                     label = { Text("Perform") }
                 )
                 NavigationBarItem(
                     selected = screen == Screen.LIBRARY,
-                    onClick = { screenName = Screen.LIBRARY.name },
+                    onClick = { navigate(Screen.LIBRARY) },
                     icon = { Text("▦", fontSize = 19.sp) },
                     label = { Text("Manage") }
+                )
+                NavigationBarItem(
+                    selected = screen == Screen.EDITOR,
+                    onClick = { navigate(Screen.EDITOR) },
+                    icon = { Text("≡", fontSize = 19.sp) },
+                    label = { Text("Editor") }
                 )
             }
         }
@@ -81,9 +101,36 @@ fun RefaceCSLiveApp(viewModel: AppViewModel) {
 
             Screen.LIBRARY -> LibraryScreen(
                 viewModel = viewModel,
+                modifier = Modifier.padding(padding),
+                onEdit = { patch ->
+                    viewModel.openEditor(patch)
+                    screenName = Screen.EDITOR.name
+                }
+            )
+
+            Screen.EDITOR -> EditorScreen(
+                viewModel = viewModel,
                 modifier = Modifier.padding(padding)
             )
         }
+    }
+
+    pendingScreen?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingScreen = null },
+            title = { Text("Discard unsaved changes?") },
+            text = { Text("The edited fader values have not been saved.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.revertEditor()
+                    screenName = target.name
+                    pendingScreen = null
+                }) { Text("DISCARD", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingScreen = null }) { Text("KEEP EDITING") }
+            }
+        )
     }
 }
 
@@ -209,11 +256,16 @@ private fun PerformancePatch(
 }
 
 @Composable
-private fun LibraryScreen(viewModel: AppViewModel, modifier: Modifier = Modifier) {
+private fun LibraryScreen(
+    viewModel: AppViewModel,
+    modifier: Modifier = Modifier,
+    onEdit: (Patch) -> Unit
+) {
     var showCaptureDialog by remember { mutableStateOf(false) }
     var showNewSetDialog by remember { mutableStateOf(false) }
     var renamePatch by remember { mutableStateOf<Patch?>(null) }
     var deletePatch by remember { mutableStateOf<Patch?>(null) }
+    var updatePatch by remember { mutableStateOf<Patch?>(null) }
     var pendingExport by remember { mutableStateOf<Patch?>(null) }
 
     val importSysex = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -277,6 +329,8 @@ private fun LibraryScreen(viewModel: AppViewModel, modifier: Modifier = Modifier
                 isLoaded = patch.id == viewModel.loadedPatchId,
                 canLoad = viewModel.midiStatus.connected && !viewModel.isBusy,
                 onLoad = { viewModel.loadPatch(patch) },
+                onEdit = { onEdit(patch) },
+                onUpdate = { updatePatch = patch },
                 onAdd = { viewModel.addPatchToCurrentSet(patch.id) },
                 onRename = { renamePatch = patch },
                 onDuplicate = { viewModel.duplicatePatch(patch.id) },
@@ -366,6 +420,20 @@ private fun LibraryScreen(viewModel: AppViewModel, modifier: Modifier = Modifier
             }
         )
     }
+    updatePatch?.let { patch ->
+        AlertDialog(
+            onDismissRequest = { updatePatch = null },
+            title = { Text("Update ${patch.name}?") },
+            text = { Text("The current sound from the reface CS will replace this saved patch. Its name and setlist positions will be preserved.") },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.updatePatchFromSynth(patch)
+                    updatePatch = null
+                }) { Text("UPDATE FROM CS") }
+            },
+            dismissButton = { TextButton(onClick = { updatePatch = null }) { Text("Cancel") } }
+        )
+    }
     deletePatch?.let { patch ->
         AlertDialog(
             onDismissRequest = { deletePatch = null },
@@ -383,7 +451,7 @@ private fun LibraryScreen(viewModel: AppViewModel, modifier: Modifier = Modifier
 }
 
 @Composable
-private fun ConnectionCard(viewModel: AppViewModel) {
+internal fun ConnectionCard(viewModel: AppViewModel) {
     var showDeviceDialog by remember { mutableStateOf(false) }
     val status = viewModel.midiStatus
     val statusColor = if (status.connected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
@@ -487,7 +555,7 @@ private fun ConnectionCard(viewModel: AppViewModel) {
 }
 
 @Composable
-private fun NoticeBanner(viewModel: AppViewModel) {
+internal fun NoticeBanner(viewModel: AppViewModel) {
     val notice = viewModel.notice ?: return
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -506,6 +574,8 @@ private fun LibraryPatchCard(
     isLoaded: Boolean,
     canLoad: Boolean,
     onLoad: () -> Unit,
+    onEdit: () -> Unit,
+    onUpdate: () -> Unit,
     onAdd: () -> Unit,
     onRename: () -> Unit,
     onDuplicate: () -> Unit,
@@ -526,6 +596,12 @@ private fun LibraryPatchCard(
                     Text(patch.parameters.summary(), style = MaterialTheme.typography.bodySmall)
                 }
                 Button(onClick = onLoad, enabled = canLoad) { Text("LOAD") }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Button(onClick = onEdit, modifier = Modifier.weight(1f)) { Text("EDIT") }
+                OutlinedButton(onClick = onUpdate, enabled = canLoad, modifier = Modifier.weight(1f)) {
+                    Text("UPDATE CS")
+                }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = onAdd, modifier = Modifier.weight(1f)) { Text("Add") }
@@ -566,7 +642,7 @@ private fun SetEntryEditor(
 }
 
 @Composable
-private fun TextInputDialog(
+internal fun TextInputDialog(
     title: String,
     initialValue: String,
     confirmLabel: String,

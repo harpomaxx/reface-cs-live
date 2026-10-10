@@ -44,6 +44,8 @@ class RefaceMidiClient(
 
     private var captureCallback: ((Result<RefaceProtocol.PatchDump>) -> Unit)? = null
     private val captureFrames = mutableListOf<ByteArray>()
+    private val pendingToneParameters = linkedMapOf<Int, PendingParameter>()
+    private var parameterFlushScheduled = false
 
     private val framer = SysExFramer { frame ->
         handler.post { receiveSysEx(frame) }
@@ -129,6 +131,41 @@ class RefaceMidiClient(
         if (device?.info?.id == selected.id) return
         disconnect("Switching MIDI device")
         open(selected)
+    }
+
+    fun sendToneParameter(
+        toneOffset: Int,
+        value: Int,
+        immediate: Boolean = false,
+        onError: (Throwable) -> Unit = {}
+    ) {
+        val message = try {
+            RefaceProtocol.toneParameterChange(toneOffset, value)
+        } catch (error: Exception) {
+            onError(error)
+            return
+        }
+        val sendPort = inputPort
+        if (sendPort == null) {
+            onError(IOException("Reface CS is not connected"))
+            return
+        }
+
+        if (immediate) {
+            pendingToneParameters.remove(toneOffset)
+            try {
+                sendPort.send(message, 0, message.size)
+            } catch (error: IOException) {
+                onError(error)
+            }
+            return
+        }
+
+        pendingToneParameters[toneOffset] = PendingParameter(value, onError)
+        if (!parameterFlushScheduled) {
+            parameterFlushScheduled = true
+            handler.postDelayed(parameterFlush, PARAMETER_THROTTLE_MS)
+        }
     }
 
     fun captureCurrentPatch(callback: (Result<RefaceProtocol.PatchDump>) -> Unit) {
@@ -277,6 +314,25 @@ class RefaceMidiClient(
         finishCapture(Result.failure(IOException("Timed out waiting for the reface CS dump")))
     }
 
+    private val parameterFlush = Runnable {
+        parameterFlushScheduled = false
+        val pending = pendingToneParameters.toMap()
+        pendingToneParameters.clear()
+        val sendPort = inputPort
+        pending.forEach { (offset, update) ->
+            if (sendPort == null) {
+                update.onError(IOException("Reface CS is not connected"))
+            } else {
+                val message = RefaceProtocol.toneParameterChange(offset, update.value)
+                try {
+                    sendPort.send(message, 0, message.size)
+                } catch (error: IOException) {
+                    update.onError(error)
+                }
+            }
+        }
+    }
+
     private fun isAddress(frame: ByteArray, high: Int, mid: Int, low: Int): Boolean =
         frame.size > 10 &&
             (frame[8].toInt() and 0xFF) == high &&
@@ -360,6 +416,9 @@ class RefaceMidiClient(
         outputPort = null
         inputPort = null
         device = null
+        handler.removeCallbacks(parameterFlush)
+        parameterFlushScheduled = false
+        pendingToneParameters.clear()
         framer.reset()
         refreshDeviceOptions()
         onStatus(Status(false, "Disconnected", reason))
@@ -370,10 +429,16 @@ class RefaceMidiClient(
         disconnect("MIDI connection closed")
     }
 
+    private data class PendingParameter(
+        val value: Int,
+        val onError: (Throwable) -> Unit
+    )
+
     private companion object {
         const val KEY_SELECTED_DEVICE = "selected_device_key"
         const val CAPTURE_TIMEOUT_MS = 2500L
         const val BULK_MESSAGE_GAP_MS = 12L
+        const val PARAMETER_THROTTLE_MS = 30L
         const val USB_SCORE = 5
     }
 }

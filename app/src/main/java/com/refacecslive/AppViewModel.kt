@@ -55,9 +55,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var loadedEntryIndex by mutableIntStateOf(-1)
         private set
 
+    var editorPatchId by mutableStateOf<String?>(null)
+        private set
+
+    var editorToneData by mutableStateOf<ByteArray?>(null)
+        private set
+
+    private var editorOriginalToneData: ByteArray? = null
+
+    var editorLiveSend by mutableStateOf(false)
+        private set
+
     private val midiClient = RefaceMidiClient(
         context = application,
-        onStatus = { status -> midiStatus = status },
+        onStatus = { status ->
+            midiStatus = status
+            if (!status.connected) editorLiveSend = false
+        },
         onDevicesChanged = { devices, selectedId ->
             midiDevices.clear()
             midiDevices.addAll(devices)
@@ -71,12 +85,147 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val currentSetPatches: List<Patch?>
         get() = currentSet.patchIds.map { id -> patches.firstOrNull { it.id == id } }
 
+    val editorPatch: Patch?
+        get() = editorPatchId?.let { id -> patches.firstOrNull { it.id == id } }
+
+    val editorHasUnsavedChanges: Boolean
+        get() {
+            val current = editorToneData ?: return false
+            val original = editorOriginalToneData ?: return false
+            return !current.contentEquals(original)
+        }
+
     fun scanForDevice() {
         midiClient.scanAndConnect()
     }
 
     fun selectMidiDevice(deviceId: Int) {
         midiClient.selectDevice(deviceId)
+    }
+
+    fun openEditor(patch: Patch) {
+        val data = RefaceProtocol.parsePatchDump(patch.sysex).toneData
+        editorPatchId = patch.id
+        editorOriginalToneData = data.copyOf()
+        editorToneData = data.copyOf()
+        editorLiveSend = false
+    }
+
+    fun updateEditorLiveSend(enabled: Boolean) {
+        editorLiveSend = enabled
+    }
+
+    fun editorParameterChanged(toneOffset: Int): Boolean {
+        val current = editorToneData ?: return false
+        val original = editorOriginalToneData ?: return false
+        return toneOffset in current.indices && current[toneOffset] != original[toneOffset]
+    }
+
+    fun setEditorParameter(toneOffset: Int, value: Int, finished: Boolean = false) {
+        val current = editorToneData ?: return
+        if (toneOffset !in current.indices || value !in 0..127) return
+        if ((current[toneOffset].toInt() and 0xFF) == value && !finished) return
+        val updated = current.copyOf()
+        updated[toneOffset] = value.toByte()
+        editorToneData = updated
+
+        if (editorLiveSend) {
+            midiClient.sendToneParameter(
+                toneOffset = toneOffset,
+                value = value,
+                immediate = finished,
+                onError = { error -> notice = error.message ?: "Could not send parameter" }
+            )
+        }
+    }
+
+    fun auditionEditor() {
+        val data = editorToneData ?: return
+        val patch = editorPatch ?: return
+        val dump = try {
+            RefaceProtocol.buildPatchDump(data)
+        } catch (error: Exception) {
+            notice = error.message ?: "Invalid patch values"
+            return
+        }
+        if (isBusy) return
+        isBusy = true
+        notice = "Auditioning ${patch.name}…"
+        midiClient.sendPatch(dump.sysex) { result ->
+            isBusy = false
+            result.onSuccess {
+                loadedPatchId = patch.id
+                loadedEntryIndex = -1
+                notice = "Auditioning ${patch.name}"
+            }.onFailure { error ->
+                notice = error.message ?: "Could not audition patch"
+            }
+        }
+    }
+
+    fun saveEditorChanges() {
+        val patchId = editorPatchId ?: return
+        val data = editorToneData ?: return
+        val index = patches.indexOfFirst { it.id == patchId }
+        if (index < 0) return
+        try {
+            val dump = RefaceProtocol.buildPatchDump(data)
+            patches[index] = patches[index].copy(sysex = dump.sysex)
+            editorOriginalToneData = data.copyOf()
+            editorToneData = data.copyOf()
+            persist()
+            notice = "Saved ${patches[index].name}"
+        } catch (error: Exception) {
+            notice = error.message ?: "Could not save patch"
+        }
+    }
+
+    fun saveEditorCopy(name: String) {
+        val data = editorToneData ?: return
+        try {
+            val dump = RefaceProtocol.buildPatchDump(data)
+            val patch = Patch(
+                name = name.trim().ifEmpty { "${editorPatch?.name ?: "Patch"} Copy" },
+                sysex = dump.sysex
+            )
+            patches.add(patch)
+            persist()
+            openEditor(patch)
+            notice = "Saved ${patch.name}"
+        } catch (error: Exception) {
+            notice = error.message ?: "Could not save patch copy"
+        }
+    }
+
+    fun revertEditor() {
+        val original = editorOriginalToneData ?: return
+        editorToneData = original.copyOf()
+        notice = "Reverted unsaved changes"
+    }
+
+    fun updatePatchFromSynth(patch: Patch) {
+        if (isBusy) return
+        isBusy = true
+        notice = "Updating ${patch.name} from reface CS…"
+        midiClient.captureCurrentPatch { result ->
+            isBusy = false
+            result.onSuccess { dump ->
+                val index = patches.indexOfFirst { it.id == patch.id }
+                if (index >= 0) {
+                    patches[index] = patches[index].copy(sysex = dump.sysex)
+                    if (editorPatchId == patch.id) {
+                        editorOriginalToneData = dump.toneData.copyOf()
+                        editorToneData = dump.toneData.copyOf()
+                    }
+                    loadedPatchId = patch.id
+                    loadedEntryIndex = -1
+                    persist()
+                    notice = "Updated ${patch.name} from reface CS"
+                }
+            }.onFailure { error ->
+                notice = error.message ?: "Could not update patch"
+            }
+        }
     }
 
     fun capturePatch(name: String) {
@@ -190,6 +339,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             currentSetId = restored.currentSetId ?: performanceSets.first().id
             loadedPatchId = null
             loadedEntryIndex = -1
+            editorPatchId = null
+            editorToneData = null
+            editorOriginalToneData = null
             persist()
             notice = "Library restored"
         } catch (error: Exception) {
@@ -222,6 +374,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (loadedPatchId == patchId) {
             loadedPatchId = null
             loadedEntryIndex = -1
+        }
+        if (editorPatchId == patchId) {
+            editorPatchId = null
+            editorToneData = null
+            editorOriginalToneData = null
         }
         persist()
     }

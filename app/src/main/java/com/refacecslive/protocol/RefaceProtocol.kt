@@ -66,6 +66,29 @@ object RefaceProtocol {
         return messages
     }
 
+    /** Creates a complete, checksummed 61-byte bulk dump from 22 tone bytes. */
+    fun buildPatchDump(toneData: ByteArray, deviceNumber: Int = 0): PatchDump {
+        if (toneData.size != 22) throw InvalidDumpException("Tone data must be 22 bytes")
+        require(deviceNumber in 0..15) { "Device number must be between 0 and 15" }
+        validateToneRanges(toneData)
+        val data = toneData.copyOf()
+        val sysex = makeBulkFrame(deviceNumber, HEADER_ADDRESS, byteArrayOf()) +
+            makeBulkFrame(deviceNumber, TONE_ADDRESS, data) +
+            makeBulkFrame(deviceNumber, FOOTER_ADDRESS, byteArrayOf())
+        return PatchDump(sysex, data, parseParameters(data))
+    }
+
+    /** Builds a one-byte tone-generator parameter-change message. */
+    fun toneParameterChange(toneOffset: Int, value: Int, deviceNumber: Int = 0): ByteArray {
+        require(toneOffset in 0..21) { "Tone parameter offset must be between 0 and 21" }
+        require(value in 0..127) { "MIDI parameter value must be between 0 and 127" }
+        require(deviceNumber in 0..15) { "Device number must be between 0 and 15" }
+        return bytes(
+            0xF0, YAMAHA, 0x10 or deviceNumber, GROUP_HIGH, GROUP_LOW, MODEL_CS,
+            TONE_ADDRESS.high, TONE_ADDRESS.mid, toneOffset, value, 0xF7
+        )
+    }
+
     /**
      * Parses a standard 61-byte reface CS patch dump. A lone tone-data block is
      * also accepted; the required bulk header and footer are generated for it.

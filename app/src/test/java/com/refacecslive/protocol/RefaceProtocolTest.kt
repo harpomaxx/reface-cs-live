@@ -69,6 +69,33 @@ class RefaceProtocolTest {
     }
 
     @Test
+    fun `builds and reparses an edited patch`() {
+        val data = ByteArray(22).also {
+            it[0] = 127
+            it[2] = 4
+            it[6] = 3
+            it[9] = 101
+            it[16] = 2
+        }
+
+        val built = RefaceProtocol.buildPatchDump(data)
+        val reparsed = RefaceProtocol.parsePatchDump(built.sysex)
+
+        assertEquals(61, built.sysex.size)
+        assertArrayEquals(data, reparsed.toneData)
+        assertEquals("Ring", reparsed.parameters.oscillatorName)
+        assertEquals("Phaser", reparsed.parameters.effectName)
+    }
+
+    @Test
+    fun `builds direct parameter change SysEx`() {
+        assertArrayEquals(
+            bytes(0xF0, 0x43, 0x10, 0x7F, 0x1C, 0x03, 0x30, 0x00, 0x09, 0x64, 0xF7),
+            RefaceProtocol.toneParameterChange(toneOffset = 9, value = 100)
+        )
+    }
+
+    @Test
     fun `dump request has Yamaha CS address`() {
         assertArrayEquals(
             bytes(0xF0, 0x43, 0x20, 0x7F, 0x1C, 0x03, 0x0E, 0x0F, 0x00, 0xF7),
